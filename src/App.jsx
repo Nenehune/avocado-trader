@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { supabase } from "./supabaseClient";
 
 // ============================================================
 // AVOCADO TRADER — Supergraphic (refined)
@@ -145,6 +146,49 @@ function MiniWord() {
   );
 }
 
+function AuthScreen() {
+  const [email, setEmail] = useState("");
+  const [sending, setSending] = useState(false);
+  const [sent, setSent] = useState(false);
+  const [error, setError] = useState("");
+
+  const sendLink = async () => {
+    if (!email.trim() || sending) return;
+    setSending(true);
+    setError("");
+    const { error } = await supabase.auth.signInWithOtp({
+      email: email.trim(),
+      options: { emailRedirectTo: window.location.origin },
+    });
+    setSending(false);
+    if (error) setError(error.message);
+    else setSent(true);
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", flex: 1, padding: "32px 24px 24px" }}>
+      <Lockup />
+      <div style={{ fontFamily: "'Fraunces', serif", fontSize: 26, fontWeight: 900, letterSpacing: "-0.01em", color: C.ink, marginTop: 12, marginBottom: 6 }}>
+        Sign in
+      </div>
+      <div style={{ fontSize: 15, color: C.sub, lineHeight: 1.5, marginBottom: 24 }}>
+        We'll email you a link — no password needed.
+      </div>
+      {sent ? (
+        <div style={{ background: C.card, border: `1.5px solid ${C.cardEdge}`, borderRadius: 20, padding: "20px 22px", fontSize: 15, color: C.ink, lineHeight: 1.5 }}>
+          Check <strong>{email}</strong> for a sign-in link.
+        </div>
+      ) : (
+        <>
+          <Field label="Email" value={email} onChange={setEmail} placeholder="you@example.com" />
+          {error && <div style={{ fontSize: 14, color: C.red, marginTop: -10, marginBottom: 16, lineHeight: 1.5 }}>{error}</div>}
+          <Btn onClick={sendLink} style={{ opacity: sending ? 0.7 : 1 }}>{sending ? "Sending…" : "Send magic link"}</Btn>
+        </>
+      )}
+    </div>
+  );
+}
+
 function Sweep({ onDone }) {
   useEffect(() => { const t = setTimeout(onDone, 1350); return () => clearTimeout(t); }, [onDone]);
   return (
@@ -167,6 +211,13 @@ export default function App() {
   const [sweeping, setSweeping] = useState(null);
   const [demoSide, setDemoSide] = useState(false);
   const [partner, setPartner] = useState(PARTNERS[0]);
+  const [session, setSession] = useState(undefined);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => setSession(session));
+    return () => listener.subscription.unsubscribe();
+  }, []);
 
   const mine = trades.filter((t) => t.partner === partner);
   const active = mine.filter((t) => t.status === "your-move" || t.status === "waiting");
@@ -203,37 +254,52 @@ export default function App() {
 
       <div style={{ width: "100%", maxWidth: 400, background: C.bg, borderRadius: 28, position: "relative", overflow: "hidden",
         boxShadow: "0 12px 40px rgba(37,64,76,0.18)", display: "flex", flexDirection: "column", minHeight: 720 }}>
-        {view.name === "home" && (
-          <Home tab={view.tab} setTab={(tab) => setView({ name: "home", tab })} active={active} done={done}
-            partner={partner} setPartner={setPartner}
-            open={(id) => setView({ name: "detail", id })}
-            onNew={() => { setDraft({ offering: "", want: "" }); setView({ name: "new" }); }} />
+        {session === undefined && (
+          <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: C.sub, fontSize: 15 }}>Loading…</div>
         )}
-        {view.name === "new" && (
-          <Compose title="New trade" subtitle={`To ${partner}`} draft={draft} setDraft={setDraft} onSend={sendNew}
-            onBack={() => setView({ name: "home", tab: "active" })} sendLabel={`Send to ${partner}`} />
-        )}
-        {view.name === "detail" && current && (
-          <Detail trade={current} sweeping={sweeping === current.id} onSweepDone={finishSweep}
-            onAccept={() => setSweeping(current.id)}
-            onCounter={() => { setDraft({ offering: current.offering, want: current.want }); setView({ name: "counter", id: current.id }); }}
-            onWalk={() => { update(current.id, { status: "declined" }); setView({ name: "home", tab: "done" }); }}
-            onBack={() => setView({ name: "home", tab: "active" })} demoSide={demoSide} setDemoSide={setDemoSide} />
-        )}
-        {view.name === "counter" && current && (
-          <Compose title={demoSide ? `Counter as ${current.partner}` : "Counter"} draft={draft} setDraft={setDraft} onSend={sendCounter}
-            onBack={() => setView({ name: "detail", id: current.id })} sendLabel="Send it back" />
+        {session === null && <AuthScreen />}
+        {session && (
+          <>
+            {view.name === "home" && (
+              <Home tab={view.tab} setTab={(tab) => setView({ name: "home", tab })} active={active} done={done}
+                partner={partner} setPartner={setPartner}
+                open={(id) => setView({ name: "detail", id })}
+                onNew={() => { setDraft({ offering: "", want: "" }); setView({ name: "new" }); }}
+                onSignOut={() => supabase.auth.signOut()} />
+            )}
+            {view.name === "new" && (
+              <Compose title="New trade" subtitle={`To ${partner}`} draft={draft} setDraft={setDraft} onSend={sendNew}
+                onBack={() => setView({ name: "home", tab: "active" })} sendLabel={`Send to ${partner}`} />
+            )}
+            {view.name === "detail" && current && (
+              <Detail trade={current} sweeping={sweeping === current.id} onSweepDone={finishSweep}
+                onAccept={() => setSweeping(current.id)}
+                onCounter={() => { setDraft({ offering: current.offering, want: current.want }); setView({ name: "counter", id: current.id }); }}
+                onWalk={() => { update(current.id, { status: "declined" }); setView({ name: "home", tab: "done" }); }}
+                onBack={() => setView({ name: "home", tab: "active" })} demoSide={demoSide} setDemoSide={setDemoSide} />
+            )}
+            {view.name === "counter" && current && (
+              <Compose title={demoSide ? `Counter as ${current.partner}` : "Counter"} draft={draft} setDraft={setDraft} onSend={sendCounter}
+                onBack={() => setView({ name: "detail", id: current.id })} sendLabel="Send it back" />
+            )}
+          </>
         )}
       </div>
     </div>
   );
 }
 
-function Home({ tab, setTab, active, done, partner, setPartner, open, onNew }) {
+function Home({ tab, setTab, active, done, partner, setPartner, open, onNew, onSignOut }) {
   const list = tab === "active" ? active : done;
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, padding: "32px 24px 24px" }}>
       <Lockup />
+
+      <button onClick={onSignOut}
+        style={{ alignSelf: "flex-end", background: "none", border: "none", fontFamily: "'Jost', sans-serif", fontSize: 13.5,
+          color: C.sub, cursor: "pointer", padding: "4px 0", marginBottom: 4, minHeight: 44 }}>
+        Sign out
+      </button>
 
       {/* partner picker */}
       <div style={{ display: "flex", gap: 8, marginTop: 14, marginBottom: 20, overflowX: "auto", paddingBottom: 2 }}>
