@@ -112,11 +112,12 @@ function Btn({ children, onClick, kind = "solid", color = C.coral, textColor = "
   );
 }
 
-function Field({ label, value, onChange, placeholder }) {
+function Field({ label, value, onChange, placeholder, inputMode, maxLength, autoFocus }) {
   return (
     <div style={{ marginBottom: 20 }}>
       <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: C.sub, marginBottom: 8 }}>{label}</div>
       <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder}
+        inputMode={inputMode} maxLength={maxLength} autoFocus={autoFocus}
         style={{ width: "100%", boxSizing: "border-box", fontFamily: "'Jost', sans-serif", fontSize: 17, minHeight: 50,
           color: C.ink, background: C.card, border: `1.5px solid ${C.cardEdge}`, borderRadius: 14, padding: "13px 16px", outline: "none" }}
         onFocus={(e) => (e.currentTarget.style.borderColor = C.orange)}
@@ -133,42 +134,89 @@ function MiniWord() {
 }
 
 function AuthScreen() {
+  const [step, setStep] = useState("email"); // "email" | "code"
   const [email, setEmail] = useState("");
+  const [code, setCode] = useState("");
   const [sending, setSending] = useState(false);
-  const [sent, setSent] = useState(false);
+  const [verifying, setVerifying] = useState(false);
   const [error, setError] = useState("");
+  const [resent, setResent] = useState(false);
 
-  const sendLink = async () => {
+  const sendCode = async () => {
     if (!email.trim() || sending) return;
     setSending(true);
     setError("");
-    const { error } = await supabase.auth.signInWithOtp({
-      email: email.trim(),
-      options: { emailRedirectTo: window.location.origin },
-    });
+    const { error } = await supabase.auth.signInWithOtp({ email: email.trim() });
     setSending(false);
     if (error) setError(error.message);
-    else setSent(true);
+    else setStep("code");
+  };
+
+  const resendCode = async () => {
+    if (sending) return;
+    setSending(true);
+    setError("");
+    setResent(false);
+    const { error } = await supabase.auth.signInWithOtp({ email: email.trim() });
+    setSending(false);
+    if (error) setError(error.message);
+    else setResent(true);
+  };
+
+  const verifyCode = async () => {
+    if (!code.trim() || verifying) return;
+    setVerifying(true);
+    setError("");
+    const { error } = await supabase.auth.verifyOtp({ email: email.trim(), token: code.trim(), type: "email" });
+    setVerifying(false);
+    if (error) setError(error.message);
+  };
+
+  const backToEmail = () => {
+    setStep("email");
+    setCode("");
+    setError("");
+    setResent(false);
   };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, padding: "32px 24px 24px" }}>
       <Lockup />
-      <div style={{ fontFamily: "'Fraunces', serif", fontSize: 26, fontWeight: 900, letterSpacing: "-0.01em", color: C.ink, marginTop: 12, marginBottom: 6 }}>
-        Sign in
-      </div>
-      <div style={{ fontSize: 15, color: C.sub, lineHeight: 1.5, marginBottom: 24 }}>
-        We'll email you a link — no password needed.
-      </div>
-      {sent ? (
-        <div style={{ background: C.card, border: `1.5px solid ${C.cardEdge}`, borderRadius: 20, padding: "20px 22px", fontSize: 15, color: C.ink, lineHeight: 1.5 }}>
-          Check <strong>{email}</strong> for a sign-in link.
-        </div>
+      {step === "email" ? (
+        <>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 26, fontWeight: 900, letterSpacing: "-0.01em", color: C.ink, marginTop: 12, marginBottom: 6 }}>
+            Sign in
+          </div>
+          <div style={{ fontSize: 15, color: C.sub, lineHeight: 1.5, marginBottom: 24 }}>
+            We'll email you a 6-digit code — no password needed.
+          </div>
+          <Field label="Email" value={email} onChange={setEmail} placeholder="you@example.com" autoFocus />
+          {error && <div style={{ fontSize: 14, color: C.red, marginTop: -10, marginBottom: 16, lineHeight: 1.5 }}>{error}</div>}
+          <Btn onClick={sendCode} style={{ opacity: sending ? 0.7 : 1 }}>{sending ? "Sending…" : "Send code"}</Btn>
+        </>
       ) : (
         <>
-          <Field label="Email" value={email} onChange={setEmail} placeholder="you@example.com" />
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 26, fontWeight: 900, letterSpacing: "-0.01em", color: C.ink, marginTop: 12, marginBottom: 6 }}>
+            Enter code
+          </div>
+          <div style={{ fontSize: 15, color: C.sub, lineHeight: 1.5, marginBottom: 24 }}>
+            We sent a 6-digit code to <strong>{email}</strong>.
+          </div>
+          <Field label="Code" value={code} onChange={(v) => setCode(v.replace(/\D/g, "").slice(0, 6))} placeholder="123456"
+            inputMode="numeric" maxLength={6} autoFocus />
           {error && <div style={{ fontSize: 14, color: C.red, marginTop: -10, marginBottom: 16, lineHeight: 1.5 }}>{error}</div>}
-          <Btn onClick={sendLink} style={{ opacity: sending ? 0.7 : 1 }}>{sending ? "Sending…" : "Send magic link"}</Btn>
+          {resent && !error && <div style={{ fontSize: 14, color: C.teal, marginTop: -10, marginBottom: 16, lineHeight: 1.5 }}>Code resent.</div>}
+          <Btn onClick={verifyCode} style={{ opacity: verifying ? 0.7 : 1 }}>{verifying ? "Verifying…" : "Verify"}</Btn>
+          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 12 }}>
+            <button onClick={backToEmail}
+              style={{ background: "none", border: "none", fontFamily: "'Jost', sans-serif", fontSize: 13.5, color: C.sub, cursor: "pointer", padding: "10px 0", minHeight: 44 }}>
+              Change email
+            </button>
+            <button onClick={resendCode} disabled={sending}
+              style={{ background: "none", border: "none", fontFamily: "'Jost', sans-serif", fontSize: 13.5, color: C.sub, cursor: "pointer", padding: "10px 0", minHeight: 44, opacity: sending ? 0.6 : 1 }}>
+              Resend code
+            </button>
+          </div>
         </>
       )}
     </div>
