@@ -283,7 +283,7 @@ export default function App() {
   }, [me, partnerId]);
 
   const partner = profiles.find((p) => p.id === partnerId);
-  const active = trades.filter((t) => t.status === "pending");
+  const active = trades.filter((t) => t.status === "waiting" || t.status === "your-move");
   const done = trades.filter((t) => t.status === "accepted" || t.status === "declined");
   const current = trades.find((t) => t.id === view.id);
   const applyUpdate = (row) => setTrades((ts) => ts.map((t) => (t.id === row.id ? row : t)));
@@ -293,7 +293,7 @@ export default function App() {
     const offering = draft.offering.trim();
     const want = draft.want.trim() || "Make me an offer";
     const { data } = await supabase.from("trades").insert({
-      from_user: me, to_user: partnerId, offering, want, status: "pending",
+      from_user: me, to_user: partnerId, offering, want, status: "waiting",
     }).select().single();
     if (data) {
       setTrades((ts) => [data, ...ts]);
@@ -469,7 +469,7 @@ function Compose({ title, subtitle, draft, setDraft, onSend, onBack, sendLabel }
 
 function Detail({ trade, me, partnerName, onAccept, onCounter, onWalk, onBack, sweeping, onSweepDone }) {
   const s = statusFor(trade, me);
-  const isOpen = trade.status === "pending";
+  const isOpen = trade.status === "waiting" || trade.status === "your-move";
   const canAct = isOpen && trade.to_user === me;
   const [history, setHistory] = useState([]);
 
