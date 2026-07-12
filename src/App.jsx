@@ -188,7 +188,7 @@ function AuthScreen() {
             Sign in
           </div>
           <div style={{ fontSize: 15, color: C.sub, lineHeight: 1.5, marginBottom: 24 }}>
-            We'll email you a 6-digit code — no password needed.
+            We'll email you an 8-digit code — no password needed.
           </div>
           <Field label="Email" value={email} onChange={setEmail} placeholder="you@example.com" autoFocus />
           {error && <div style={{ fontSize: 14, color: C.red, marginTop: -10, marginBottom: 16, lineHeight: 1.5 }}>{error}</div>}
@@ -200,10 +200,10 @@ function AuthScreen() {
             Enter code
           </div>
           <div style={{ fontSize: 15, color: C.sub, lineHeight: 1.5, marginBottom: 24 }}>
-            We sent a 6-digit code to <strong>{email}</strong>.
+            We sent an 8-digit code to <strong>{email}</strong>.
           </div>
-          <Field label="Code" value={code} onChange={(v) => setCode(v.replace(/\D/g, "").slice(0, 6))} placeholder="123456"
-            inputMode="numeric" maxLength={6} autoFocus />
+          <Field label="Code" value={code} onChange={(v) => setCode(v.replace(/\D/g, "").slice(0, 8))} placeholder="12345678"
+            inputMode="numeric" maxLength={8} autoFocus />
           {error && <div style={{ fontSize: 14, color: C.red, marginTop: -10, marginBottom: 16, lineHeight: 1.5 }}>{error}</div>}
           {resent && !error && <div style={{ fontSize: 14, color: C.teal, marginTop: -10, marginBottom: 16, lineHeight: 1.5 }}>Code resent.</div>}
           <Btn onClick={verifyCode} style={{ opacity: verifying ? 0.7 : 1 }}>{verifying ? "Verifying…" : "Verify"}</Btn>
