@@ -83,30 +83,16 @@ function StackWord({ text, mt = 0 }) {
   );
 }
 
-const PARTNERS = ["Sis", "Mom", "Theo"];
-
-const seed = [
-  { id: 1, partner: "Sis", offering: "2 avocados", want: "One (1) sincere compliment", status: "waiting",
-    history: [{ by: "you", offering: "2 avocados", want: "One (1) sincere compliment" }] },
-  { id: 2, partner: "Sis", offering: "Half a sandwich", want: "The good parking spot, Saturday only", status: "your-move",
-    history: [
-      { by: "you", offering: "Half a sandwich", want: "The good parking spot" },
-      { by: "Sis", offering: "Half a sandwich", want: "The good parking spot, Saturday only" },
-    ] },
-  { id: 3, partner: "Sis", offering: "I do bedtime tonight", want: "You do dishes", status: "accepted",
-    history: [{ by: "you", offering: "I do bedtime tonight", want: "You do dishes" }] },
-  { id: 4, partner: "Mom", offering: "Rake the leaves", want: "Your lasagna recipe (for real this time)", status: "your-move",
-    history: [{ by: "Mom", offering: "Rake the leaves", want: "Your lasagna recipe (for real this time)" }] },
-  { id: 5, partner: "Theo", offering: "My good headphones, 1 week", want: "You feed the cat while I'm gone", status: "waiting",
-    history: [{ by: "you", offering: "My good headphones, 1 week", want: "You feed the cat while I'm gone" }] },
-];
-
-const STATUS = {
-  "your-move": { label: "Your move", color: "#CC6E2A" },
-  waiting: { label: "Waiting", color: "#3E7C6F" },
+const STATUS_META = {
   accepted: { label: "Accepted", color: "#3E7C6F" },
   declined: { label: "Walked away", color: "#8F856C" },
 };
+
+function statusFor(trade, me) {
+  if (trade.status === "accepted" || trade.status === "declined") return STATUS_META[trade.status];
+  const myTurn = trade.to_user === me;
+  return myTurn ? { label: "Your move", color: "#CC6E2A" } : { label: "Waiting", color: "#3E7C6F" };
+}
 
 function Btn({ children, onClick, kind = "solid", color = C.coral, textColor = "#F8F1DC", style }) {
   const base = { fontFamily: "'Jost', sans-serif", fontSize: 16, fontWeight: 600, letterSpacing: "0.02em",
@@ -205,13 +191,15 @@ function Sweep({ onDone }) {
 }
 
 export default function App() {
-  const [trades, setTrades] = useState(seed);
+  const [session, setSession] = useState(undefined);
+  const [profiles, setProfiles] = useState([]);
+  const [partnerId, setPartnerId] = useState(null);
+  const [trades, setTrades] = useState([]);
   const [view, setView] = useState({ name: "home", tab: "active" });
   const [draft, setDraft] = useState({ offering: "", want: "" });
   const [sweeping, setSweeping] = useState(null);
-  const [demoSide, setDemoSide] = useState(false);
-  const [partner, setPartner] = useState(PARTNERS[0]);
-  const [session, setSession] = useState(undefined);
+
+  const me = session?.user?.id ?? null;
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
@@ -219,26 +207,77 @@ export default function App() {
     return () => listener.subscription.unsubscribe();
   }, []);
 
-  const mine = trades.filter((t) => t.partner === partner);
-  const active = mine.filter((t) => t.status === "your-move" || t.status === "waiting");
-  const done = mine.filter((t) => t.status === "accepted" || t.status === "declined");
-  const current = trades.find((t) => t.id === view.id);
-  const update = (id, patch) => setTrades((ts) => ts.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+  // make sure the signed-in user has a profile row, so others can see them in the partner picker
+  useEffect(() => {
+    if (!session?.user) return;
+    supabase.from("profiles").upsert({
+      id: session.user.id,
+      email: session.user.email,
+      display_name: session.user.email?.split("@")[0] ?? "",
+    });
+  }, [session?.user?.id]);
 
-  const sendNew = () => {
-    if (!draft.offering.trim()) return;
-    const t = { id: Date.now(), partner, offering: draft.offering.trim(), want: draft.want.trim() || "Make me an offer",
-      status: "waiting", history: [{ by: "you", offering: draft.offering.trim(), want: draft.want.trim() || "Make me an offer" }] };
-    setTrades((ts) => [t, ...ts]); setDraft({ offering: "", want: "" }); setView({ name: "home", tab: "active" });
+  useEffect(() => {
+    if (!me) return;
+    supabase.from("profiles").select("id, display_name, email").neq("id", me)
+      .then(({ data }) => {
+        setProfiles(data ?? []);
+        setPartnerId((current) => current ?? data?.[0]?.id ?? null);
+      });
+  }, [me]);
+
+  useEffect(() => {
+    if (!me || !partnerId) { setTrades([]); return; }
+    supabase.from("trades").select("*")
+      .or(`and(from_user.eq.${me},to_user.eq.${partnerId}),and(from_user.eq.${partnerId},to_user.eq.${me})`)
+      .order("created_at", { ascending: false })
+      .then(({ data }) => setTrades(data ?? []));
+  }, [me, partnerId]);
+
+  const partner = profiles.find((p) => p.id === partnerId);
+  const active = trades.filter((t) => t.status === "pending");
+  const done = trades.filter((t) => t.status === "accepted" || t.status === "declined");
+  const current = trades.find((t) => t.id === view.id);
+  const applyUpdate = (row) => setTrades((ts) => ts.map((t) => (t.id === row.id ? row : t)));
+
+  const sendNew = async () => {
+    if (!draft.offering.trim() || !partnerId) return;
+    const offering = draft.offering.trim();
+    const want = draft.want.trim() || "Make me an offer";
+    const { data } = await supabase.from("trades").insert({
+      from_user: me, to_user: partnerId, offering, want, status: "pending",
+    }).select().single();
+    if (data) {
+      setTrades((ts) => [data, ...ts]);
+      await supabase.from("trade_offers").insert({ trade_id: data.id, by_user: me, offering, want });
+    }
+    setDraft({ offering: "", want: "" });
+    setView({ name: "home", tab: "active" });
   };
-  const sendCounter = () => {
+  const sendCounter = async () => {
     if (!current) return;
-    const by = demoSide ? current.partner : "you";
-    update(current.id, { offering: draft.offering, want: draft.want, status: demoSide ? "your-move" : "waiting",
-      history: [...current.history, { by, offering: draft.offering, want: draft.want }] });
+    const other = current.from_user === me ? current.to_user : current.from_user;
+    const { data } = await supabase.from("trades")
+      .update({ offering: draft.offering, want: draft.want, from_user: me, to_user: other })
+      .eq("id", current.id).select().single();
+    if (data) {
+      applyUpdate(data);
+      await supabase.from("trade_offers").insert({ trade_id: data.id, by_user: me, offering: data.offering, want: data.want });
+    }
     setView({ name: "detail", id: current.id });
   };
-  const finishSweep = () => { update(sweeping, { status: "accepted" }); setSweeping(null); setView({ name: "home", tab: "done" }); };
+  const finishSweep = async () => {
+    const { data } = await supabase.from("trades").update({ status: "accepted" }).eq("id", sweeping).select().single();
+    if (data) applyUpdate(data);
+    setSweeping(null);
+    setView({ name: "home", tab: "done" });
+  };
+  const walkAway = async () => {
+    if (!current) return;
+    const { data } = await supabase.from("trades").update({ status: "declined" }).eq("id", current.id).select().single();
+    if (data) applyUpdate(data);
+    setView({ name: "home", tab: "done" });
+  };
 
   return (
     <div style={{ minHeight: "100vh", background: "#DDD1B0", display: "flex", justifyContent: "center", padding: "24px 12px", fontFamily: "'Jost', sans-serif" }}>
@@ -262,24 +301,25 @@ export default function App() {
           <>
             {view.name === "home" && (
               <Home tab={view.tab} setTab={(tab) => setView({ name: "home", tab })} active={active} done={done}
-                partner={partner} setPartner={setPartner}
+                me={me} profiles={profiles} partnerId={partnerId} setPartnerId={setPartnerId} partner={partner}
                 open={(id) => setView({ name: "detail", id })}
                 onNew={() => { setDraft({ offering: "", want: "" }); setView({ name: "new" }); }}
                 onSignOut={() => supabase.auth.signOut()} />
             )}
             {view.name === "new" && (
-              <Compose title="New trade" subtitle={`To ${partner}`} draft={draft} setDraft={setDraft} onSend={sendNew}
-                onBack={() => setView({ name: "home", tab: "active" })} sendLabel={`Send to ${partner}`} />
+              <Compose title="New trade" subtitle={partner ? `To ${partner.display_name || partner.email}` : ""} draft={draft} setDraft={setDraft} onSend={sendNew}
+                onBack={() => setView({ name: "home", tab: "active" })} sendLabel={partner ? `Send to ${partner.display_name || partner.email}` : "Send"} />
             )}
             {view.name === "detail" && current && (
-              <Detail trade={current} sweeping={sweeping === current.id} onSweepDone={finishSweep}
+              <Detail trade={current} me={me} partnerName={partner?.display_name || partner?.email}
+                sweeping={sweeping === current.id} onSweepDone={finishSweep}
                 onAccept={() => setSweeping(current.id)}
                 onCounter={() => { setDraft({ offering: current.offering, want: current.want }); setView({ name: "counter", id: current.id }); }}
-                onWalk={() => { update(current.id, { status: "declined" }); setView({ name: "home", tab: "done" }); }}
-                onBack={() => setView({ name: "home", tab: "active" })} demoSide={demoSide} setDemoSide={setDemoSide} />
+                onWalk={walkAway}
+                onBack={() => setView({ name: "home", tab: "active" })} />
             )}
             {view.name === "counter" && current && (
-              <Compose title={demoSide ? `Counter as ${current.partner}` : "Counter"} draft={draft} setDraft={setDraft} onSend={sendCounter}
+              <Compose title="Counter" draft={draft} setDraft={setDraft} onSend={sendCounter}
                 onBack={() => setView({ name: "detail", id: current.id })} sendLabel="Send it back" />
             )}
           </>
@@ -289,8 +329,9 @@ export default function App() {
   );
 }
 
-function Home({ tab, setTab, active, done, partner, setPartner, open, onNew, onSignOut }) {
+function Home({ tab, setTab, active, done, me, profiles, partnerId, setPartnerId, partner, open, onNew, onSignOut }) {
   const list = tab === "active" ? active : done;
+  const partnerName = partner?.display_name || partner?.email || "them";
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, padding: "32px 24px 24px" }}>
       <Lockup />
@@ -302,25 +343,26 @@ function Home({ tab, setTab, active, done, partner, setPartner, open, onNew, onS
       </button>
 
       {/* partner picker */}
-      <div style={{ display: "flex", gap: 8, marginTop: 14, marginBottom: 20, overflowX: "auto", paddingBottom: 2 }}>
-        {PARTNERS.map((p) => {
-          const on = p === partner;
-          return (
-            <button key={p} onClick={() => setPartner(p)}
-              style={{ flexShrink: 0, fontFamily: "'Jost', sans-serif", fontSize: 15, fontWeight: 600, minHeight: 44,
-                padding: "9px 18px", borderRadius: 999, cursor: "pointer",
-                border: on ? "none" : `1.5px solid ${C.cardEdge}`,
-                background: on ? C.coral : "transparent", color: on ? "#F8F1DC" : C.sub }}>
-              {p}
-            </button>
-          );
-        })}
-        <button aria-label="Add partner"
-          style={{ flexShrink: 0, fontFamily: "'Jost', sans-serif", fontSize: 20, fontWeight: 500, minHeight: 44, minWidth: 44,
-            padding: "0 4px", borderRadius: 999, cursor: "pointer", border: `1.5px dashed ${C.cardEdge}`, background: "transparent", color: C.sub }}>
-          +
-        </button>
-      </div>
+      {profiles.length > 0 ? (
+        <div style={{ display: "flex", gap: 8, marginTop: 14, marginBottom: 20, overflowX: "auto", paddingBottom: 2 }}>
+          {profiles.map((p) => {
+            const on = p.id === partnerId;
+            return (
+              <button key={p.id} onClick={() => setPartnerId(p.id)}
+                style={{ flexShrink: 0, fontFamily: "'Jost', sans-serif", fontSize: 15, fontWeight: 600, minHeight: 44,
+                  padding: "9px 18px", borderRadius: 999, cursor: "pointer",
+                  border: on ? "none" : `1.5px solid ${C.cardEdge}`,
+                  background: on ? C.coral : "transparent", color: on ? "#F8F1DC" : C.sub }}>
+                {p.display_name || p.email}
+              </button>
+            );
+          })}
+        </div>
+      ) : (
+        <div style={{ fontSize: 14, color: C.sub, marginTop: 14, marginBottom: 20, lineHeight: 1.5 }}>
+          No one else has signed in yet — once someone does, they'll show up here to trade with.
+        </div>
+      )}
 
       <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
         {["active", "done"].map((t) => (
@@ -334,17 +376,17 @@ function Home({ tab, setTab, active, done, partner, setPartner, open, onNew, onS
       </div>
 
       <div style={{ flex: 1, overflowY: "auto" }}>
-        {list.length === 0 && <div style={{ textAlign: "center", color: C.sub, fontSize: 15, marginTop: 60, lineHeight: 1.5 }}>Nothing here with {partner} yet. Start a trade below.</div>}
-        {list.map((t, i) => <TradeCard key={t.id} trade={t} onClick={() => open(t.id)} delay={i * 0.05} />)}
+        {list.length === 0 && <div style={{ textAlign: "center", color: C.sub, fontSize: 15, marginTop: 60, lineHeight: 1.5 }}>Nothing here with {partnerName} yet. Start a trade below.</div>}
+        {list.map((t, i) => <TradeCard key={t.id} trade={t} onClick={() => open(t.id)} delay={i * 0.05} me={me} partnerName={partnerName} />)}
       </div>
 
-      <Btn onClick={onNew} style={{ marginTop: 16 }}>+ New trade</Btn>
+      {partnerId && <Btn onClick={onNew} style={{ marginTop: 16 }}>+ New trade</Btn>}
     </div>
   );
 }
 
-function TradeCard({ trade, onClick, delay }) {
-  const s = STATUS[trade.status];
+function TradeCard({ trade, onClick, delay, me, partnerName }) {
+  const s = statusFor(trade, me);
   return (
     <div onClick={onClick} role="button" tabIndex={0} onKeyDown={(e) => e.key === "Enter" && onClick()}
       style={{ background: C.card, border: `1.5px solid ${C.cardEdge}`, borderRadius: 20, padding: "16px 20px", marginBottom: 12, cursor: "pointer", animation: `rise 0.35s ${delay}s ease backwards` }}>
@@ -352,7 +394,7 @@ function TradeCard({ trade, onClick, delay }) {
         <div style={{ fontSize: 12.5, fontWeight: 700, letterSpacing: "0.09em", textTransform: "uppercase", color: s.color }}>
           {trade.status === "accepted" ? <MiniStripes /> : s.label}
         </div>
-        <div style={{ fontSize: 13.5, color: C.sub }}>{trade.partner}</div>
+        <div style={{ fontSize: 13.5, color: C.sub }}>{partnerName}</div>
       </div>
       <div style={{ fontSize: 17, fontWeight: 600, color: C.ink, marginBottom: 3, lineHeight: 1.4 }}>{trade.offering}</div>
       <div style={{ fontSize: 15, color: C.sub, lineHeight: 1.4 }}>for {trade.want}</div>
@@ -377,10 +419,17 @@ function Compose({ title, subtitle, draft, setDraft, onSend, onBack, sendLabel }
   );
 }
 
-function Detail({ trade, onAccept, onCounter, onWalk, onBack, sweeping, onSweepDone, demoSide, setDemoSide }) {
-  const s = STATUS[trade.status];
-  const isOpen = trade.status === "your-move" || trade.status === "waiting";
-  const canAct = trade.status === "your-move" || demoSide;
+function Detail({ trade, me, partnerName, onAccept, onCounter, onWalk, onBack, sweeping, onSweepDone }) {
+  const s = statusFor(trade, me);
+  const isOpen = trade.status === "pending";
+  const canAct = isOpen && trade.to_user === me;
+  const [history, setHistory] = useState([]);
+
+  useEffect(() => {
+    supabase.from("trade_offers").select("*").eq("trade_id", trade.id).order("created_at", { ascending: true })
+      .then(({ data }) => setHistory(data ?? []));
+  }, [trade.id, trade.offering, trade.want, trade.status]);
+
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, padding: "24px 24px 24px" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
@@ -399,12 +448,12 @@ function Detail({ trade, onAccept, onCounter, onWalk, onBack, sweeping, onSweepD
         {sweeping && <Sweep onDone={onSweepDone} />}
       </div>
 
-      {trade.history.length > 1 && (
+      {history.length > 1 && (
         <div style={{ marginBottom: 20 }}>
           <div style={{ fontSize: 12.5, fontWeight: 600, letterSpacing: "0.11em", textTransform: "uppercase", color: C.sub, marginBottom: 8 }}>Haggling so far</div>
-          {trade.history.map((h, i) => (
-            <div key={i} style={{ fontSize: 14, color: C.sub, padding: "7px 0", lineHeight: 1.5, borderBottom: i < trade.history.length - 1 ? `1px solid ${C.cardEdge}` : "none" }}>
-              <span style={{ color: h.by === "you" ? "#3E7C6F" : "#CC6E2A", fontWeight: 600 }}>{h.by === "you" ? "You" : "Sis"}:</span> {h.offering} for {h.want}
+          {history.map((h, i) => (
+            <div key={h.id} style={{ fontSize: 14, color: C.sub, padding: "7px 0", lineHeight: 1.5, borderBottom: i < history.length - 1 ? `1px solid ${C.cardEdge}` : "none" }}>
+              <span style={{ color: h.by_user === me ? "#3E7C6F" : "#CC6E2A", fontWeight: 600 }}>{h.by_user === me ? "You" : partnerName}:</span> {h.offering} for {h.want}
             </div>
           ))}
         </div>
@@ -414,7 +463,7 @@ function Detail({ trade, onAccept, onCounter, onWalk, onBack, sweeping, onSweepD
 
       {isOpen && (
         <>
-          {!canAct && <div style={{ fontSize: 14, color: C.sub, textAlign: "center", marginBottom: 12, lineHeight: 1.5 }}>Sis's move. Sit tight — or flip the demo switch below to answer as her.</div>}
+          {!canAct && <div style={{ fontSize: 14, color: C.sub, textAlign: "center", marginBottom: 12, lineHeight: 1.5 }}>{partnerName}'s move. Sit tight.</div>}
           {canAct && (
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               <Btn onClick={onAccept} color={C.teal}>Accept trade</Btn>
@@ -422,10 +471,6 @@ function Detail({ trade, onAccept, onCounter, onWalk, onBack, sweeping, onSweepD
               <Btn onClick={onWalk} kind="quiet">Walk away</Btn>
             </div>
           )}
-          <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 16, fontSize: 13.5, color: C.sub, cursor: "pointer", justifyContent: "center", minHeight: 44 }}>
-            <input type="checkbox" checked={demoSide} onChange={(e) => setDemoSide(e.target.checked)} style={{ width: 18, height: 18 }} />
-            Demo: act as Sis
-          </label>
         </>
       )}
 
