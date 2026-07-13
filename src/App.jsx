@@ -94,17 +94,18 @@ function statusFor(trade, me) {
   return myTurn ? { label: "Your move", color: "#CC6E2A" } : { label: "Waiting", color: "#3E7C6F" };
 }
 
-function Btn({ children, onClick, kind = "solid", color = C.coral, textColor = "#F8F1DC", style }) {
+function Btn({ children, onClick, kind = "solid", color = C.coral, textColor = "#F8F1DC", style, disabled }) {
   const base = { fontFamily: "'Jost', sans-serif", fontSize: 16, fontWeight: 600, letterSpacing: "0.02em",
-    minHeight: 50, padding: "13px 18px", borderRadius: 999, cursor: "pointer", border: "none", transition: "transform 0.08s ease", width: "100%" };
+    minHeight: 50, padding: "13px 18px", borderRadius: 999, cursor: disabled ? "default" : "pointer", border: "none",
+    transition: "transform 0.08s ease", width: "100%", opacity: disabled ? 0.6 : 1 };
   const kinds = {
     solid: { background: color, color: textColor },
     ghost: { background: "transparent", color: C.ink, border: `1.5px solid ${C.cardEdge}` },
     quiet: { background: "transparent", color: C.sub },
   };
   return (
-    <button onClick={onClick} style={{ ...base, ...kinds[kind], ...style }}
-      onMouseDown={(e) => (e.currentTarget.style.transform = "scale(0.97)")}
+    <button onClick={onClick} disabled={disabled} style={{ ...base, ...kinds[kind], ...style }}
+      onMouseDown={(e) => !disabled && (e.currentTarget.style.transform = "scale(0.97)")}
       onMouseUp={(e) => (e.currentTarget.style.transform = "scale(1)")}
       onMouseLeave={(e) => (e.currentTarget.style.transform = "scale(1)")}>
       {children}
@@ -246,12 +247,28 @@ export default function App() {
   const [view, setView] = useState({ name: "home", tab: "active" });
   const [draft, setDraft] = useState({ offering: "", want: "" });
   const [sweeping, setSweeping] = useState(null);
+  const [appError, setAppError] = useState("");
+  const [busy, setBusy] = useState(false);
 
   const me = session?.user?.id ?? null;
 
+  const resetLocalState = () => {
+    setProfiles([]);
+    setPartnerId(null);
+    setTrades([]);
+    setView({ name: "home", tab: "active" });
+    setDraft({ offering: "", want: "" });
+    setSweeping(null);
+    setAppError("");
+    setBusy(false);
+  };
+
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => setSession(session));
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+      if (!session) resetLocalState();
+    });
     return () => listener.subscription.unsubscribe();
   }, []);
 
@@ -262,13 +279,16 @@ export default function App() {
       id: session.user.id,
       email: session.user.email,
       display_name: session.user.email?.split("@")[0] ?? "",
+    }).then(({ error }) => {
+      if (error) setAppError(`Couldn't save your profile: ${error.message}`);
     });
   }, [session?.user?.id]);
 
   useEffect(() => {
     if (!me) return;
-    supabase.from("profiles").select("id, display_name, email").neq("id", me)
-      .then(({ data }) => {
+    supabase.from("profiles").select("id, display_name, email").neq("id", me).order("display_name")
+      .then(({ data, error }) => {
+        if (error) { setAppError(`Couldn't load your people: ${error.message}`); return; }
         setProfiles(data ?? []);
         setPartnerId((current) => current ?? data?.[0]?.id ?? null);
       });
@@ -279,51 +299,112 @@ export default function App() {
     supabase.from("trades").select("*")
       .or(`and(from_user.eq.${me},to_user.eq.${partnerId}),and(from_user.eq.${partnerId},to_user.eq.${me})`)
       .order("created_at", { ascending: false })
-      .then(({ data }) => setTrades(data ?? []));
+      .then(({ data, error }) => {
+        if (error) { setAppError(`Couldn't load trades: ${error.message}`); return; }
+        setTrades(data ?? []);
+      });
+  }, [me, partnerId]);
+
+  // live sync: pick up trades the other person creates/counters/accepts/declines in real time
+  useEffect(() => {
+    if (!me || !partnerId) return;
+    const channel = supabase
+      .channel(`trades-${me}-${partnerId}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "trades" }, (payload) => {
+        const row = payload.new && Object.keys(payload.new).length ? payload.new : payload.old;
+        if (!row) return;
+        const involvesPair =
+          (row.from_user === me && row.to_user === partnerId) ||
+          (row.from_user === partnerId && row.to_user === me);
+        if (!involvesPair) return;
+        if (payload.eventType === "DELETE") {
+          setTrades((ts) => ts.filter((t) => t.id !== row.id));
+          return;
+        }
+        applyUpdate(row);
+      })
+      .subscribe();
+    return () => supabase.removeChannel(channel);
   }, [me, partnerId]);
 
   const partner = profiles.find((p) => p.id === partnerId);
   const active = trades.filter((t) => t.status === "waiting" || t.status === "your-move");
   const done = trades.filter((t) => t.status === "accepted" || t.status === "declined");
   const current = trades.find((t) => t.id === view.id);
-  const applyUpdate = (row) => setTrades((ts) => ts.map((t) => (t.id === row.id ? row : t)));
+  const applyUpdate = (row) => setTrades((ts) => {
+    const exists = ts.some((t) => t.id === row.id);
+    return exists ? ts.map((t) => (t.id === row.id ? row : t)) : [row, ...ts];
+  });
 
   const sendNew = async () => {
-    if (!draft.offering.trim() || !partnerId) return;
+    if (!draft.offering.trim() || !partnerId || busy) return;
+    setBusy(true);
+    setAppError("");
     const offering = draft.offering.trim();
     const want = draft.want.trim() || "Make me an offer";
-    const { data } = await supabase.from("trades").insert({
+    const { data, error } = await supabase.from("trades").insert({
       from_user: me, to_user: partnerId, offering, want, status: "waiting",
     }).select().single();
-    if (data) {
-      setTrades((ts) => [data, ...ts]);
-      await supabase.from("trade_offers").insert({ trade_id: data.id, by_user: me, offering, want });
+    if (error) {
+      setBusy(false);
+      setAppError(`Couldn't send the trade: ${error.message}`);
+      return;
     }
+    applyUpdate(data);
+    const { error: historyError } = await supabase.from("trade_offers").insert({ trade_id: data.id, by_user: me, offering, want });
+    setBusy(false);
+    if (historyError) setAppError(`Trade sent, but couldn't save its history: ${historyError.message}`);
     setDraft({ offering: "", want: "" });
     setView({ name: "home", tab: "active" });
   };
   const sendCounter = async () => {
-    if (!current) return;
+    if (!current || busy) return;
+    setBusy(true);
+    setAppError("");
     const other = current.from_user === me ? current.to_user : current.from_user;
-    const { data } = await supabase.from("trades")
+    const { data, error } = await supabase.from("trades")
       .update({ offering: draft.offering, want: draft.want, from_user: me, to_user: other })
       .eq("id", current.id).select().single();
-    if (data) {
-      applyUpdate(data);
-      await supabase.from("trade_offers").insert({ trade_id: data.id, by_user: me, offering: data.offering, want: data.want });
+    if (error) {
+      setBusy(false);
+      setAppError(`Couldn't send your counter: ${error.message}`);
+      return;
     }
+    applyUpdate(data);
+    const { error: historyError } = await supabase.from("trade_offers").insert({ trade_id: data.id, by_user: me, offering: data.offering, want: data.want });
+    setBusy(false);
+    if (historyError) setAppError(`Counter sent, but couldn't save its history: ${historyError.message}`);
     setView({ name: "detail", id: current.id });
   };
-  const finishSweep = async () => {
-    const { data } = await supabase.from("trades").update({ status: "accepted" }).eq("id", sweeping).select().single();
-    if (data) applyUpdate(data);
+  const acceptTrade = async (tradeId) => {
+    if (busy) return;
+    setBusy(true);
+    setAppError("");
+    setSweeping(tradeId);
+    // Fire the write immediately rather than waiting for the sweep animation to
+    // finish — the animation is purely cosmetic and can be interrupted (e.g. by
+    // tapping Back), but the accept itself must never depend on that timer.
+    const { data, error } = await supabase.from("trades").update({ status: "accepted" }).eq("id", tradeId).select().single();
+    setBusy(false);
+    if (error) {
+      setSweeping(null);
+      setAppError(`Couldn't accept the trade: ${error.message}`);
+      return;
+    }
+    applyUpdate(data);
+  };
+  const finishSweep = () => {
     setSweeping(null);
     setView({ name: "home", tab: "done" });
   };
   const walkAway = async () => {
-    if (!current) return;
-    const { data } = await supabase.from("trades").update({ status: "declined" }).eq("id", current.id).select().single();
-    if (data) applyUpdate(data);
+    if (!current || busy) return;
+    setBusy(true);
+    setAppError("");
+    const { data, error } = await supabase.from("trades").update({ status: "declined" }).eq("id", current.id).select().single();
+    setBusy(false);
+    if (error) { setAppError(`Couldn't walk away: ${error.message}`); return; }
+    applyUpdate(data);
     setView({ name: "home", tab: "done" });
   };
 
@@ -341,6 +422,16 @@ export default function App() {
 
       <div style={{ width: "100%", maxWidth: 400, background: C.bg, borderRadius: 28, position: "relative", overflow: "hidden",
         boxShadow: "0 12px 40px rgba(37,64,76,0.18)", display: "flex", flexDirection: "column", minHeight: 720 }}>
+        {appError && (
+          <div style={{ background: "#F6D9CE", color: C.red, fontSize: 14, lineHeight: 1.4, padding: "12px 20px",
+            display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+            <span>{appError}</span>
+            <button onClick={() => setAppError("")} aria-label="Dismiss"
+              style={{ background: "none", border: "none", color: C.red, cursor: "pointer", fontSize: 20, lineHeight: 1, padding: 0, flexShrink: 0 }}>
+              ×
+            </button>
+          </div>
+        )}
         {session === undefined && (
           <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: C.sub, fontSize: 15 }}>Loading…</div>
         )}
@@ -356,19 +447,19 @@ export default function App() {
             )}
             {view.name === "new" && (
               <Compose title="New trade" subtitle={partner ? `To ${partner.display_name || partner.email}` : ""} draft={draft} setDraft={setDraft} onSend={sendNew}
-                onBack={() => setView({ name: "home", tab: "active" })} sendLabel={partner ? `Send to ${partner.display_name || partner.email}` : "Send"} />
+                onBack={() => setView({ name: "home", tab: "active" })} sendLabel={partner ? `Send to ${partner.display_name || partner.email}` : "Send"} busy={busy} />
             )}
             {view.name === "detail" && current && (
               <Detail trade={current} me={me} partnerName={partner?.display_name || partner?.email}
-                sweeping={sweeping === current.id} onSweepDone={finishSweep}
-                onAccept={() => setSweeping(current.id)}
+                sweeping={sweeping === current.id} onSweepDone={finishSweep} busy={busy} onError={setAppError}
+                onAccept={() => acceptTrade(current.id)}
                 onCounter={() => { setDraft({ offering: current.offering, want: current.want }); setView({ name: "counter", id: current.id }); }}
                 onWalk={walkAway}
                 onBack={() => setView({ name: "home", tab: "active" })} />
             )}
             {view.name === "counter" && current && (
               <Compose title="Counter" draft={draft} setDraft={setDraft} onSend={sendCounter}
-                onBack={() => setView({ name: "detail", id: current.id })} sendLabel="Send it back" />
+                onBack={() => setView({ name: "detail", id: current.id })} sendLabel="Send it back" busy={busy} />
             )}
           </>
         )}
@@ -450,7 +541,7 @@ function TradeCard({ trade, onClick, delay, me, partnerName }) {
   );
 }
 
-function Compose({ title, subtitle, draft, setDraft, onSend, onBack, sendLabel }) {
+function Compose({ title, subtitle, draft, setDraft, onSend, onBack, sendLabel, busy }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, padding: "24px 24px 24px" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 32 }}>
@@ -462,12 +553,12 @@ function Compose({ title, subtitle, draft, setDraft, onSend, onBack, sendLabel }
       <Field label="You offer" value={draft.offering} onChange={(v) => setDraft((d) => ({ ...d, offering: v }))} placeholder="2 avocados" />
       <Field label="You want" value={draft.want} onChange={(v) => setDraft((d) => ({ ...d, want: v }))} placeholder="Leave blank for “make me an offer”" />
       <div style={{ flex: 1 }} />
-      <Btn onClick={onSend}>{sendLabel}</Btn>
+      <Btn onClick={onSend} disabled={busy}>{busy ? "Sending…" : sendLabel}</Btn>
     </div>
   );
 }
 
-function Detail({ trade, me, partnerName, onAccept, onCounter, onWalk, onBack, sweeping, onSweepDone }) {
+function Detail({ trade, me, partnerName, onAccept, onCounter, onWalk, onBack, sweeping, onSweepDone, busy, onError }) {
   const s = statusFor(trade, me);
   const isOpen = trade.status === "waiting" || trade.status === "your-move";
   const canAct = isOpen && trade.to_user === me;
@@ -475,8 +566,22 @@ function Detail({ trade, me, partnerName, onAccept, onCounter, onWalk, onBack, s
 
   useEffect(() => {
     supabase.from("trade_offers").select("*").eq("trade_id", trade.id).order("created_at", { ascending: true })
-      .then(({ data }) => setHistory(data ?? []));
+      .then(({ data, error }) => {
+        if (error) { onError(`Couldn't load trade history: ${error.message}`); return; }
+        setHistory(data ?? []);
+      });
   }, [trade.id, trade.offering, trade.want, trade.status]);
+
+  // live sync: pick up the other person's counter-offers as they land
+  useEffect(() => {
+    const channel = supabase
+      .channel(`trade_offers-${trade.id}`)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "trade_offers", filter: `trade_id=eq.${trade.id}` }, (payload) => {
+        setHistory((h) => (h.some((x) => x.id === payload.new.id) ? h : [...h, payload.new]));
+      })
+      .subscribe();
+    return () => supabase.removeChannel(channel);
+  }, [trade.id]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, padding: "24px 24px 24px" }}>
@@ -514,9 +619,9 @@ function Detail({ trade, me, partnerName, onAccept, onCounter, onWalk, onBack, s
           {!canAct && <div style={{ fontSize: 14, color: C.sub, textAlign: "center", marginBottom: 12, lineHeight: 1.5 }}>{partnerName}'s move. Sit tight.</div>}
           {canAct && (
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              <Btn onClick={onAccept} color={C.teal}>Accept trade</Btn>
-              <Btn onClick={onCounter} kind="ghost">Counter</Btn>
-              <Btn onClick={onWalk} kind="quiet">Walk away</Btn>
+              <Btn onClick={onAccept} color={C.teal} disabled={busy}>Accept trade</Btn>
+              <Btn onClick={onCounter} kind="ghost" disabled={busy}>Counter</Btn>
+              <Btn onClick={onWalk} kind="quiet" disabled={busy}>Walk away</Btn>
             </div>
           )}
         </>
